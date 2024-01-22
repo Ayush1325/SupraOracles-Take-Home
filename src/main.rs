@@ -1,7 +1,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use clap::{Parser, ValueEnum};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{pin_mut, SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -17,6 +17,8 @@ struct Cli {
     times: u64,
     #[clap(default_value = "data.json")]
     file: PathBuf,
+    #[clap(default_value = "5")]
+    clients: usize,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -34,8 +36,7 @@ struct SubscriptionRequest {
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct TickerResponse {
     topic: String,
-    #[serde(with = "chrono::serde::ts_milliseconds")]
-    ts: chrono::DateTime<chrono::Utc>,
+    ts: u64,
     cs: u64,
     data: TickerData,
 }
@@ -70,7 +71,7 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.mode {
-        Mode::Cache => cache(cli.times, cli.file).await,
+        Mode::Cache => cache(cli.times, cli.file, cli.clients).await,
         Mode::Read => tokio::task::spawn_blocking(|| read(cli.file))
             .await
             .expect("Failed to read"),
@@ -88,55 +89,47 @@ fn read(file: PathBuf) {
         });
 }
 
-async fn cache(time_in_sec: u64, file: PathBuf) {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<TickerResponse>(10);
+async fn cache(time_in_sec: u64, file: PathBuf, clients: usize) {
+    client(time_in_sec, file).await.unwrap();
+}
 
-    let compute_task = tokio::spawn(async move {
-        let mut file = tokio::fs::File::create(file)
-            .await
-            .expect("Failed to create file");
-        let mut avg = Decimal::new(0, 0);
-        let mut count = 0;
+async fn client(time_in_sec: u64, file: PathBuf) -> anyhow::Result<()> {
+    let mut file = tokio::fs::File::create(file).await?;
 
-        while let Some(msg) = rx.recv().await {
-            avg += msg.data.last_price;
-            count += 1;
+    let mut avg = Decimal::new(0, 0);
+    let mut count = 0;
 
-            let data = serde_json::to_vec(&FileFormat::DataPoint(msg.data.last_price)).unwrap();
-            file.write(&data).await.expect("Failed to write file");
-            file.write(b"\n").await.expect("Failed to write file");
-        }
-
-        avg /= Decimal::from(count);
-        println!("Cache Complete. The average USD price of BTC is: {avg}");
-
-        let data = serde_json::to_vec(&FileFormat::Average(avg)).unwrap();
-        file.write(&data).await.expect("Failed to write file");
-    });
-
-    let task = tokio::spawn(async move {
-        tracing::debug!("Start");
-
-        let ws = bybite_ws().await.expect("Failed to connect to bybite");
-        let tx = tokio_util::sync::PollSender::new(tx);
-        let _stream = ws
-            .filter_map(|msg| std::future::ready(msg.ok()))
-            .filter_map(|msg| async {
-                match msg {
-                    tungstenite::Message::Text(text) => {
-                        serde_json::from_str::<TickerResponse>(&text).ok()
-                    }
-                    _ => None,
+    let ws = bybite_ws().await?;
+    let stream = ws
+        .take_until(tokio::time::sleep(Duration::from_secs(time_in_sec)))
+        .filter_map(|msg| std::future::ready(msg.ok()))
+        .filter_map(|msg| async {
+            match msg {
+                tungstenite::Message::Text(text) => {
+                    serde_json::from_str::<TickerResponse>(&text).ok()
                 }
-            })
-            .map(Ok)
-            .forward(tx)
-            .await;
-    });
-    tokio::time::sleep(Duration::from_secs(time_in_sec)).await;
-    task.abort();
+                _ => None,
+            }
+        })
+        .map(|x| x.data.last_price);
 
-    compute_task.await.expect("Failed to compute");
+    pin_mut!(stream);
+    while let Some(msg) = stream.next().await {
+        avg += msg;
+        count += 1;
+
+        let data = serde_json::to_vec(&FileFormat::DataPoint(msg))?;
+        file.write(&data).await?;
+        file.write(b"\n").await?;
+    }
+
+    avg /= Decimal::from(count);
+    println!("Cache Complete. The average USD price of BTC is: {avg}");
+
+    let data = serde_json::to_vec(&FileFormat::Average(avg))?;
+    file.write(&data).await?;
+
+    Ok(())
 }
 
 async fn bybite_ws() -> anyhow::Result<
