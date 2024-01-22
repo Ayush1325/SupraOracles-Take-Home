@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use clap::{Parser, ValueEnum};
+use crypto_botters::{bybit::BybitOption, Client};
 
 #[derive(Parser)]
 struct Cli {
@@ -18,5 +21,19 @@ enum Mode {
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    tracing::info!("Hello, world!");
+    let client = Client::new();
+    let connection = client
+        .websocket(
+            "/v5/public/spot",
+            |message| tracing::info!("{}", message),
+            [BybitOption::WebSocketTopics(vec![
+                "tickers.BTCUSDT".to_string()
+            ])],
+        )
+        .await
+        .expect("Failed to connect to websocket");
+
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    tracing::info!("Finish");
 }
