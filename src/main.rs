@@ -1,6 +1,10 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use clap::{Parser, ValueEnum};
+use dsa::{
+    signature::{Signer, Verifier},
+    Components, KeySize, SigningKey, VerifyingKey,
+};
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -15,9 +19,9 @@ struct Cli {
     mode: Mode,
     #[clap(long, default_value = "10")]
     times: u64,
-    #[clap(default_value = "data.json")]
+    #[clap(long, default_value = "data.json")]
     file: PathBuf,
-    #[clap(default_value = "5")]
+    #[clap(long, default_value = "5")]
     clients: usize,
 }
 
@@ -70,6 +74,26 @@ impl std::fmt::Display for FileFormat {
     }
 }
 
+struct AggMessage {
+    avg: Decimal,
+    sign: dsa::Signature,
+}
+
+impl AggMessage {
+    fn new(avg: Decimal, sign: dsa::Signature) -> Self {
+        Self { avg, sign }
+    }
+
+    fn with_key(avg: Decimal, key: dsa::SigningKey) -> Self {
+        let sign = key.sign(&avg.serialize());
+        Self::new(avg, sign)
+    }
+
+    fn verify(&self, verify_key: &dsa::VerifyingKey) -> bool {
+        verify_key.verify(&self.avg.serialize(), &self.sign).is_ok()
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
@@ -95,11 +119,24 @@ fn read(file: PathBuf) {
         });
 }
 
+fn key_gen() -> (SigningKey, VerifyingKey) {
+    let mut csprng = rand::thread_rng();
+    let components = Components::generate(&mut csprng, KeySize::DSA_2048_224);
+    let signing_key = SigningKey::generate(&mut csprng, components);
+    let verifying_key = signing_key.verifying_key().to_owned();
+
+    (signing_key, verifying_key)
+}
+
 async fn cache(time_in_sec: u64, file: PathBuf, clients: usize) {
     let mut tasks = JoinSet::new();
     let barrier = Arc::new(tokio::sync::Barrier::new(clients));
     let (tx_file, rx_file) = mpsc::channel(clients);
     let (tx_agg, rx_agg) = mpsc::channel(clients);
+
+    tracing::debug!("Generating keys");
+
+    let (signing_key, verifying_key) = key_gen();
 
     tasks.spawn(async move {
         file_writer(file, rx_file).await.unwrap();
@@ -107,15 +144,19 @@ async fn cache(time_in_sec: u64, file: PathBuf, clients: usize) {
 
     let tx_file_clone = tx_file.clone();
     tasks.spawn(async move {
-        aggregator(rx_agg, tx_file_clone).await.unwrap();
+        aggregator(rx_agg, tx_file_clone, verifying_key)
+            .await
+            .unwrap();
     });
 
     for i in 0..clients {
         let barrier = barrier.clone();
         let tx_file = tx_file.clone();
         let tx_agg = tx_agg.clone();
+        let signing_key = signing_key.clone();
+
         tasks.spawn(async move {
-            client(i, time_in_sec, barrier, tx_file, tx_agg)
+            client(i, time_in_sec, barrier, tx_file, tx_agg, signing_key)
                 .await
                 .unwrap();
         });
@@ -130,14 +171,18 @@ async fn cache(time_in_sec: u64, file: PathBuf, clients: usize) {
 }
 
 async fn aggregator(
-    mut rx: mpsc::Receiver<Decimal>,
+    mut rx: mpsc::Receiver<AggMessage>,
     tx_file: mpsc::Sender<FileFormat>,
+    verify_key: VerifyingKey,
 ) -> anyhow::Result<()> {
     let mut avg = Decimal::new(0, 0);
     let mut count = 0;
 
     while let Some(msg) = rx.recv().await {
-        avg += msg;
+        if !msg.verify(&verify_key) {
+            panic!("Invalid signature");
+        }
+        avg += msg.avg;
         count += 1;
     }
 
@@ -167,7 +212,8 @@ async fn client(
     time_in_sec: u64,
     barrier: Arc<tokio::sync::Barrier>,
     tx_file: mpsc::Sender<FileFormat>,
-    tx_agg: mpsc::Sender<Decimal>,
+    tx_agg: mpsc::Sender<AggMessage>,
+    sign_key: SigningKey,
 ) -> anyhow::Result<()> {
     let tx_file_ref = &tx_file;
     let ws = bybite_ws(barrier).await?;
@@ -201,7 +247,7 @@ async fn client(
 
     let avg = sum / Decimal::from(count);
 
-    tx_agg.send(avg).await?;
+    tx_agg.send(AggMessage::with_key(avg, sign_key)).await?;
     tx_file
         .send(FileFormat::ClientAverage { client_id: id, avg })
         .await?;
