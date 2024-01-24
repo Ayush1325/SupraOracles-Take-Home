@@ -2,14 +2,15 @@
 
 use dsa::{
     signature::{Signer, Verifier},
-    Components, KeySize, VerifyingKey,
+    Components, KeySize,
 };
 use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 
 use crate::file::FileFormat;
 
-pub use dsa::SigningKey;
+pub use dsa::SigningKey as PrivateKey;
+pub use dsa::VerifyingKey as PublicKey;
 
 /// Message sent from client to aggregator
 pub struct AggMessage {
@@ -35,10 +36,10 @@ impl AggMessage {
 /// Generate a signing and verifying key.
 ///
 /// Using DSA with 2048 bit key size and 224 bit hash size
-pub fn key_gen() -> (SigningKey, VerifyingKey) {
+pub fn key_gen() -> (PrivateKey, PublicKey) {
     let mut csprng = rand::thread_rng();
     let components = Components::generate(&mut csprng, KeySize::DSA_2048_224);
-    let signing_key = SigningKey::generate(&mut csprng, components);
+    let signing_key = PrivateKey::generate(&mut csprng, components);
     let verifying_key = signing_key.verifying_key().to_owned();
 
     (signing_key, verifying_key)
@@ -48,7 +49,7 @@ pub fn key_gen() -> (SigningKey, VerifyingKey) {
 pub async fn aggregator(
     mut rx: mpsc::Receiver<AggMessage>,
     tx_file: mpsc::Sender<FileFormat>,
-    verify_key: VerifyingKey,
+    verify_key: PublicKey,
 ) -> anyhow::Result<()> {
     let mut avg = Decimal::new(0, 0);
     let mut count = 0;

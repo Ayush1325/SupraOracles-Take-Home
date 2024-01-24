@@ -79,7 +79,7 @@ async fn client(
     barrier: Arc<tokio::sync::Barrier>,
     tx_file: mpsc::Sender<FileFormat>,
     tx_agg: mpsc::Sender<AggMessage>,
-    sign_key: aggregator::SigningKey,
+    sign_key: aggregator::PrivateKey,
 ) -> anyhow::Result<()> {
     let tx_file_ref = &tx_file;
     let ws = bybite::bybite_ws(barrier).await?;
