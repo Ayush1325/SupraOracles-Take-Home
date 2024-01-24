@@ -1,3 +1,5 @@
+//! Bybit websocket helpers
+
 use std::sync::Arc;
 
 use futures_util::SinkExt;
@@ -8,6 +10,7 @@ use tokio_tungstenite::tungstenite;
 const URL: &str = "wss://stream.bybit.com/v5/public/spot";
 
 #[derive(Serialize)]
+/// Request to subscribe to a tickers
 struct SubscriptionRequest {
     op: &'static str,
     args: &'static [&'static str],
@@ -23,6 +26,9 @@ impl SubscriptionRequest {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+/// Ticker Response from bybit websocket
+///
+/// No reason to deserialize more data than what I need
 pub struct TickerResponse {
     data: TickerData,
 }
@@ -50,6 +56,9 @@ impl TryFrom<tungstenite::Message> for TickerResponse {
     }
 }
 
+/// Connect to bybit websocket
+///
+/// Uses a barrier to ensure all clients subscribe at the same time
 pub async fn bybite_ws(
     barrier: Arc<tokio::sync::Barrier>,
 ) -> anyhow::Result<

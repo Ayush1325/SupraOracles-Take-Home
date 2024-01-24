@@ -10,22 +10,39 @@ mod aggregator;
 mod bybite;
 mod file;
 
-pub use file::read;
+/// Read from cache file and print to stdout
+pub async fn read(file: PathBuf) {
+    tracing::debug!("Running read command");
 
+    tokio::task::spawn_blocking(|| {
+        file::read(file).for_each(|x| {
+            let x = x.expect("Failed to deserialize");
+            println!("{x}");
+        });
+    })
+    .await
+    .expect("Failed to read");
+}
+
+/// Cache data from multiple bybit websockets to a file.
+/// Also calculate the average of the data.
 pub async fn cache(time_in_sec: u64, file: PathBuf, clients: usize) {
+    tracing::debug!("Running cache command");
+
     let mut tasks = JoinSet::new();
     let barrier = Arc::new(tokio::sync::Barrier::new(clients));
     let (tx_file, rx_file) = mpsc::channel(clients);
     let (tx_agg, rx_agg) = mpsc::channel(clients);
 
-    tracing::debug!("Generating keys");
-
+    tracing::info!("Generating keys");
     let (signing_key, verifying_key) = aggregator::key_gen();
 
+    tracing::info!("Spawning File Writer");
     tasks.spawn(async move {
         file::file_writer(file, rx_file).await.unwrap();
     });
 
+    tracing::info!("Spawning Aggregator");
     let tx_file_clone = tx_file.clone();
     tasks.spawn(async move {
         aggregator::aggregator(rx_agg, tx_file_clone, verifying_key)
@@ -33,6 +50,7 @@ pub async fn cache(time_in_sec: u64, file: PathBuf, clients: usize) {
             .unwrap();
     });
 
+    tracing::info!("Spawning Clients");
     for i in 0..clients {
         let barrier = barrier.clone();
         let tx_file = tx_file.clone();
@@ -54,6 +72,7 @@ pub async fn cache(time_in_sec: u64, file: PathBuf, clients: usize) {
     }
 }
 
+/// Connect to bybit websocket and send data to file and aggregator
 async fn client(
     id: usize,
     time_in_sec: u64,

@@ -1,3 +1,5 @@
+//! Aggregator module
+
 use dsa::{
     signature::{Signer, Verifier},
     Components, KeySize, VerifyingKey,
@@ -9,6 +11,7 @@ use crate::file::FileFormat;
 
 pub use dsa::SigningKey;
 
+/// Message sent from client to aggregator
 pub struct AggMessage {
     avg: Decimal,
     sign: dsa::Signature,
@@ -29,6 +32,9 @@ impl AggMessage {
     }
 }
 
+/// Generate a signing and verifying key.
+///
+/// Using DSA with 2048 bit key size and 224 bit hash size
 pub fn key_gen() -> (SigningKey, VerifyingKey) {
     let mut csprng = rand::thread_rng();
     let components = Components::generate(&mut csprng, KeySize::DSA_2048_224);
@@ -38,6 +44,7 @@ pub fn key_gen() -> (SigningKey, VerifyingKey) {
     (signing_key, verifying_key)
 }
 
+/// Aggregator function
 pub async fn aggregator(
     mut rx: mpsc::Receiver<AggMessage>,
     tx_file: mpsc::Sender<FileFormat>,
